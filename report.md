@@ -57,7 +57,15 @@ graph TD
 1. **Phase 1 (Reconnaissance & Codebase Disclosure):** An unauthenticated attacker discovers the `/ftp` directory (Finding 2) through directory brute-forcing or analyzing the site's `robots.txt` file. Finding directory listing active, they download `package.json.bak` using a double-URL-encoded null byte (`%2500.md`) to bypass the download extension whitelist.
 2. **Phase 2 (Stack Discovery & Authentication Bypass):** Analyzing the leaked `package.json.bak` reveals the backend library stack (specifically Sequelize and SQLite3). Informed of this structure, the attacker probes the `/rest/user/login` endpoint and exploits a SQL Injection vulnerability (Finding 1) with the payload `' OR 1=1--` to bypass authentication and log in directly as the administrator.
 3. **Phase 3 (Privilege Escalation & Data Harvesting):** In parallel, because self-registration is publicly open, the attacker registers a standard customer account to obtain a valid JWT. They exploit Insecure Direct Object Reference (IDOR) (Finding 3) on the `/rest/basket/{id}` endpoint. By altering the basket ID path parameter, they systematically scrape purchase data for all registered users.
-4. **Phase 4 (Impact & Records Exposed):** The combination of these exploits exposes sensitive purchase history and personally identifiable information (PII) for all 24 registered database users. The attacker also acquires admin-level token privileges and exposes internal configuration files, representing a severe data breach.
+
+---
+
+## Standalone Business Impact & Regulatory Risk
+The successful execution of this attack chain has severe business and regulatory implications:
+
+1. **Personally Identifiable Information (PII) Exposure:** The attacker successfully harvested database records and purchase histories for all 24 registered users (including customer names, emails, and transaction patterns).
+2. **Regulatory Penalties (Kenya DPA 2019):** Because the compromised database contains customer PII, this constitutes a personal data breach under Kenya's Data Protection Act 2019. Under Section 43, the organization is legally mandated to report this breach to the Office of the Data Protection Commissioner (ODPC) within 72 hours of identification. Section 72 outlines administrative fines of up to KES 5,000,000 or 1% of the annual turnover, whichever is lower, for failing to safeguard user data.
+3. **Proprietary Risk & Intellectual Property Exposure:** Exposing the internal `/ftp` path leaks backup files (`package.json.bak`, `coupons_2013.md.bak`), exposing system dependencies and weak coupon structures. This allows adversaries to reverse-engineer promo codes (direct financial impact) and perform targeted vulnerability testing on system packages.
 
 ---
 
@@ -108,6 +116,9 @@ The server exposes directory listing and download capability for the `/ftp` rout
 
 ### Verification of Bypass on v19.3.1
 The null byte bypass remains fully functional on OWASP Juice Shop v19.3.1. When requesting `http://localhost:3000/ftp/package.json.bak%2500.md`, the web server receives the request, processes the `.md` extension check, but the low-level file system read API truncates the path at the null character, outputting the contents of `package.json.bak`.
+
+> [!NOTE]
+> **Leaked File Version Details:** The target container is running OWASP Juice Shop v19.3.1. However, the recovered `package.json.bak` file details `"version": "6.2.0-SNAPSHOT"`. This is because the backup file itself is legacy configuration debris left statically in the container's `/ftp` directory by the developers, which confirms file system authenticity.
 
 ### Reproduction
 1. Direct the browser to `http://localhost:3000/ftp` or run:
@@ -203,7 +214,17 @@ The application does not validate that the user requesting the shopping basket o
 Modern Sequelize implementation of basket fetching retrieves basket resources based directly on the path parameter without validating if the JWT's embedded `bid` matches the path's `{id}`.
 
 ### Remediation
-- Enforce server-side authorization checks on the `/rest/basket/{id}` endpoint to ensure the user ID in the JWT matches the `UserId` associated with the requested basket.
+- Enforce strict server-side authorization checks on the `/rest/basket/{id}` route to verify that the authenticated user's basket ID from the decrypted JWT payload (`req.user.bid` or `req.user.id`) matches the requested path parameter `{id}`. Example implementation:
+  ```javascript
+  if (req.user.bid !== req.params.id) {
+    return res.status(403).json({ error: 'Access denied: Basket ID mismatch' });
+  }
+  ```
+- Constrain the database lookup to the user's scope. Query the database using a strict user identifier check:
+  ```javascript
+  Basket.findOne({ where: { id: req.params.id, UserId: req.user.id } })
+  ```
+- Implement automated integration tests (e.g., using Supertest and Mocha) to request mismatched basket paths and assert a `403 Forbidden` response to prevent regression of object-level access controls.
 - Avoid using predictable, sequential integer keys for basket paths; utilize UUIDs or session-bound paths where appropriate.
 
 ### References
