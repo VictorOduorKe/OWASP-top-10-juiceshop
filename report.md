@@ -12,15 +12,26 @@ These are the findings from the penetration test of OWASP Juice Shop - v19.3.1 @
 | # | Finding | OWASP Category | Severity | CVSS v3.1 Score | CVSS Vector |
 |---|---------|----------------|----------|-----------------|-------------|
 | 1 | SQL Injection in Login Endpoint | A03:2021 – Injection | Critical | 9.8 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` |
-| 2 | Insecure Direct Object Reference (IDOR) on Baskets | A01:2021 – Broken Access Control | High | 7.5 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N` |
+| 2 | Insecure Direct Object Reference (IDOR) on Baskets | A01:2021 – Broken Access Control | Medium | 6.5 | `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N` |
 | 3 | Forced Browsing & Information Disclosure via `/ftp` | A05:2021 – Security Misconfiguration | High | 7.5 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N` |
 
 ## Attack Chain Narrative
-An unauthenticated external attacker can chain these three vulnerabilities to achieve significant compromise of customer data.
+An unauthenticated external attacker can chain these vulnerabilities to achieve a complete compromise of customer purchase history, administrative configurations, and internal coupon codes.
 
-1. **Phase 1 (Access Acquisition):** The attacker exploits a SQL Injection vulnerability (Finding 1) on the `/rest/user/login` endpoint by injecting the payload `' OR 1=1--` in the email field. This bypasses authentication completely, logging the attacker into the application as the administrator user and providing the administrator's JSON Web Token (JWT).
-2. **Phase 2 (Privilege Escalation / Data Harvesting):** Armed with the administrator's JWT, the attacker leverages Insecure Direct Object Reference (IDOR) (Finding 2) on the `/rest/basket/{id}` endpoint. By altering the basket ID path parameter, the attacker can view and harvest sensitive personally identifiable information (PII) and purchase history for all registered customer baskets.
-3. **Phase 3 (Further Disclosure):** Finally, the attacker performs forced browsing to the `/ftp` directory (Finding 3), which suffers from Security Misconfiguration (directory listing enabled). Finding internal backup files like `coupons_2013.md.bak`, the attacker bypasses the restricted file extensions using a double-URL-encoded null byte (`%2500.md`) to download the file, revealing legacy coupon schemes and reversible hashes.
+```mermaid
+graph TD
+    A[Unauthenticated Attacker] -->|Exploits SQL Injection| B(Gain Admin JWT / Access admin console)
+    A -->|Public Registration| C[Create Low-Privileged Account]
+    C -->|Obtain Standard JWT| D(Standard User Session)
+    D -->|Exploits Basket IDOR| E(Harvest PII & Orders of 24 Users)
+    D -->|Forced Browsing /ftp| F(Bypass extension whitelist via null byte)
+    F -->|Download coupons_2013.md.bak%2500.md| G(Expose Reversible Coupon Cryptography)
+```
+
+1. **Phase 1 (Administrative Access Acquisition):** The attacker exploits a SQL Injection vulnerability (Finding 1) on the `/rest/user/login` endpoint by injecting the payload `' OR 1=1--` in the email field. This bypasses authentication completely, logging the attacker into the application as the administrator and providing the administrator's JSON Web Token (JWT).
+2. **Phase 2 (Privilege Escalation & Data Harvesting):** While the administrator account provides full administrative backend access, the attacker seeks to harvest shopping basket data without relying on administrative APIs. The attacker registers a standard, low-privileged customer account (which is open to the public via the signup interface) to obtain a standard user JWT. The attacker then leverages Insecure Direct Object Reference (IDOR) (Finding 2) on the `GET /rest/basket/{id}` endpoint. By iterating the basket ID path parameter, the attacker can view and harvest sensitive purchase data and order details of any customer.
+3. **Phase 3 (Forced Browsing & Whitelist Bypass):** Using the knowledge gained or through unauthenticated directory enumeration, the attacker browses the `/ftp` directory (Finding 3), which suffers from Security Misconfiguration (directory listing enabled). Upon spotting backup files like `coupons_2013.md.bak`, the attacker bypasses the application's strict extension whitelist check using a double-URL-encoded null byte (`%2500.md`). This truncates the filesystem read at the null byte, serving the raw backup contents.
+4. **Phase 4 (Business Impact & Records Exposed):** The successful execution of this attack chain allows the attacker to dump database records for all 24 registered users in the database, including emails and role distributions. They can map out complete purchase histories, compromise internal business logic (e.g., active and historical discount coupons), and potentially pivot to wider database exploitation, causing severe damage to brand reputation and compliance status.
 
 ---
 
@@ -49,7 +60,7 @@ curl -X POST http://localhost:3000/rest/user/login \
 *Figure 1: Application returns administrator session token and login data.*
 
 ### Root Cause
-The database handler concatenates user-supplied email input directly into the SQL query query string instead of executing a parameterized query. The injected `--` comments out the password evaluation check, and `OR 1=1` forces the clause to evaluate to true, defaulting to the first record in the database table (the administrator).
+The database handler concatenates user-supplied email input directly into the SQL query string instead of executing a parameterized query. The injected `--` comments out the password evaluation check, and `OR 1=1` forces the clause to evaluate to true, defaulting to the first record in the database table (the administrator).
 
 ### Remediation
 - Use parameterized queries or ORM equivalents (e.g., Sequelize's replacement bindings) to ensure inputs are treated strictly as data rather than SQL executable commands.
@@ -62,12 +73,15 @@ The database handler concatenates user-supplied email input directly into the SQ
 ---
 
 ## Finding 2 — A01:2021 — Broken Access Control (Basket IDOR)
-**Severity:** High  
-**CVSS v3.1:** 7.5 (`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`)  
+**Severity:** Medium  
+**CVSS v3.1:** 6.5 (`CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N`)  
 **Endpoint:** `GET /rest/basket/{id}`
 
+> [!NOTE]
+> **CVSS Vector Justification:** Because the `/rest/basket/{id}` route enforces authentication, the attacker must possess a valid JSON Web Token (JWT) to query the endpoint, which warrants **PR:L** (Privileges Required: Low). However, because registration is public and self-service, any external user can register a low-privileged account instantly. If your threat model considers self-registration equivalent to no barrier, the vector can be evaluated as `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N` (7.5 - High).
+
 ### Description
-The application does not validate that the user requesting the shopping basket owns the corresponding basket ID. This allows an authenticated user to view arbitrary user baskets by modifying the ID parameter in the request path.
+The application does not validate that the user requesting the shopping basket owns the corresponding basket ID. This allows an authenticated standard user to view arbitrary user baskets by modifying the ID parameter in the request path.
 
 ### Reproduction
 1. Authenticate to the application as a normal user.
@@ -75,7 +89,7 @@ The application does not validate that the user requesting the shopping basket o
    ```bash
    curl -k GET http://localhost:3000/rest/basket/1 -H "Authorization: Bearer <user_token>"
    ```
-3. Alter the basket ID parameter to `2` to view details of the next customer's basket:
+3. Alter the basket ID parameter to `2` to view details of another customer's basket:
    ```bash
    curl -k GET http://localhost:3000/rest/basket/2 -H "Authorization: Bearer <user_token>"
    ```
@@ -88,7 +102,7 @@ The application does not validate that the user requesting the shopping basket o
 *Figure 3: Accessing another user's basket by modifying the basket ID.*
 
 ### Root Cause
-The controller retrieving the basket resources takes the ID directly from the request path parameter and queries the database without verifying whether the user associated with the active session token has permission to access that specific basket ID.
+The controller retrieving the basket resources takes the ID directly from the request path parameter and queries the database without verifying whether the user ID associated with the active session token matches the `UserId` associated with the requested basket.
 
 ### Remediation
 - Enforce strict server-side authorization checks on the `/rest/basket/{id}` endpoint to ensure the user ID in the JWT matches the `UserId` associated with the requested basket.
@@ -108,6 +122,9 @@ The controller retrieving the basket resources takes the ID directly from the re
 ### Description
 The server exposes directory listing and download capability for the `/ftp` route, exposing internal backup markdown documents and configuration files. Additionally, restricted file extension checks can be bypassed using URL-encoded null bytes.
 
+### Verification of Bypass on v19.3.1
+The null byte bypass remains fully functional on OWASP Juice Shop v19.3.1. When requesting `http://localhost:3000/ftp/coupons_2013.md.bak%2500.md`, the web server receives the request, processes the `.md` extension check, but the low-level file system read API truncates the path at the null character, outputting the contents of `coupons_2013.md.bak`.
+
 ### Reproduction
 1. Direct the browser to `http://localhost:3000/ftp` or run:
    ```bash
@@ -121,6 +138,22 @@ The server exposes directory listing and download capability for the `/ftp` rout
 ### Evidence
 ![Exposed FTP Directory](./screenshots/Screenshot_2026-06-17_10_30_19.png)
 *Figure 4: Active directory listing displaying files in the /ftp directory.*
+
+**Raw Response Body Content (Retrieved from v19.3.1 Instance):**
+```text
+n<MibgC7sn
+mNYS#gC7sn
+o*IVigC7sn
+k#pDlgC7sn
+o*I]pgC7sn
+n(XRvgC7sn
+n(XLtgC7sn
+k#*AfgC7sn
+q:<IqgC7sn
+pEw8ogC7sn
+pes[BgC7sn
+l}6D$gC7ss
+```
 
 ![Exposed Sensitive File Content](./screenshots/Screenshot_2026-06-17_10_30_51.png)
 *Figure 5: Successful bypass and download of coupons_2013.md.bak exposing reversible coupon structures.*
