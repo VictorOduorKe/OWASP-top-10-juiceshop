@@ -12,27 +12,52 @@ These are the findings from the penetration test of OWASP Juice Shop - v19.3.1 @
 | # | Finding | OWASP Category | Severity | CVSS v3.1 Score | CVSS Vector |
 |---|---------|----------------|----------|-----------------|-------------|
 | 1 | SQL Injection in Login Endpoint | A03:2021 – Injection | Critical | 9.8 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` |
-| 2 | Insecure Direct Object Reference (IDOR) on Baskets | A01:2021 – Broken Access Control | Medium | 6.5 | `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N` |
-| 3 | Forced Browsing & Information Disclosure via `/ftp` | A05:2021 – Security Misconfiguration | High | 7.5 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N` |
+| 2 | Forced Browsing & Information Disclosure via `/ftp` | A05:2021 – Security Misconfiguration | High | 7.5 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N` |
+| 3 | Insecure Direct Object Reference (IDOR) on Baskets | A01:2021 – Broken Access Control | Medium | 6.5 | `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N` |
+
+---
+
+## Assessment Methodology & Risk Matrix
+
+### Assessment Methodology
+The penetration test followed a standard web application security assessment framework:
+1. **Reconnaissance & Asset Discovery:** Mapping the target surface area, identifying accessible paths (such as locating the `/ftp` folder via `robots.txt` or directory brute-forcing), and analyzing public registration forms.
+2. **Vulnerability Analysis:** Probing identified endpoints (`GET /rest/basket/{id}`, `POST /rest/user/login`, and `/ftp`) for input validation weaknesses, authorization controls, and server misconfigurations.
+3. **Exploitation & Data Harvesting:** Verifying findings by executing proof-of-concept exploits (null-byte bypass to retrieve configuration files, SQL Injection authentication bypass, and IDOR sequential enumeration).
+4. **Impact Quantification & Reporting:** Evaluating business risk, mapping findings to Kenya's Data Protection Act 2019, and defining remediation strategies.
+
+### Risk Rating Matrix
+Risks are classified by combining **Likelihood** (ease of exploitation) and **Impact** (severity of business damage):
+
+| Likelihood \ Impact | Low | Medium | High |
+| :--- | :---: | :---: | :---: |
+| **High** | Medium | High | **Critical** (Finding 1) |
+| **Medium** | Low | Medium | **High** (Finding 2) |
+| **Low** | Low | Low | **Medium** (Finding 3) |
+
+- **Critical (SQL Injection):** High Likelihood & High Impact. Exploitable by unauthenticated attackers to seize full administrative session control.
+- **High (Forced Browsing via `/ftp`):** Medium Likelihood & High Impact. Allows unauthenticated users to download restricted files by appending double-encoded null-bytes.
+- **Medium (Basket IDOR):** Low Likelihood (requires authenticated standard token) & High Impact (exposes PII of all users).
+
+---
 
 ## Attack Chain Narrative
-An unauthenticated external attacker can chain these vulnerabilities to achieve a complete compromise of customer purchase history, administrative configurations, and internal coupon codes.
+An attacker can combine these vulnerabilities to systematically extract proprietary codebase configurations, bypass authentication filters, and harvest sensitive purchase histories.
 
 ```mermaid
 graph TD
-    A[Unauthenticated Attacker] -->|Registers standard account| B(Obtain Low-Privileged JWT)
-    B -->|Exploits Basket IDOR - Finding 2| C(Harvest user baskets & Admin's basket metadata)
-    C -->|Reveals /ftp directory & backup file path| D(Target /ftp folder)
-    D -->|Forced Browsing & Whitelist Bypass - Finding 3| E(Download coupons_2013.md.bak)
-    E -->|Exposes source/SQL query construction comments| F(Identify Login SQLi Vulnerability)
-    F -->|Exploits SQL Injection - Finding 1| G(Seize Administrator Session & Full System Control)
+    A[Unauthenticated Attacker] -->|Directory Guessing / robots.txt| B(Discover /ftp Directory - Finding 2)
+    B -->|Exploits Whitelist Bypass| C(Download package.json.bak)
+    C -->|Identifies Stack & Dependencies| D(Target Login Endpoint)
+    D -->|Exploits SQL Injection - Finding 1| E(Log in as Administrator / Full System Control)
+    A -->|Public Registration| F(Create Low-Privileged Account)
+    F -->|Exploits Basket IDOR - Finding 3| G(Harvest PII & Purchase History of 24 Users)
 ```
 
-1. **Phase 1 (Initial Access & IDOR Enumeration):** The attacker registers a standard, low-privileged customer account (open to the public via the signup interface) to obtain a valid JWT. They then exploit the Insecure Direct Object Reference (IDOR) vulnerability (Finding 2) on the `GET /rest/basket/{id}` endpoint. By iterating the basket ID parameter, they scrape the purchase histories of all 24 registered users.
-2. **Phase 2 (Information Disclosure & Path Discovery):** While analyzing the administrator's basket (ID 1), the attacker discovers items or checkout metadata referencing internal storage structures and backup paths, specifically pointing to the existence of the restricted `/ftp` directory.
-3. **Phase 3 (Forced Browsing & Whitelist Bypass):** Using this path, the attacker performs forced browsing on the `/ftp` directory (Finding 3) which is misconfigured to allow directory listing. They locate the backup file `coupons_2013.md.bak` and bypass the server's extension whitelist check using a double-URL-encoded null byte (`%2500.md`) to download it.
-4. **Phase 4 (SQL query structure leak & Administrative Takeover):** Within the downloaded backup file, the attacker finds developer comments detailing the database query structure for the login routing, exposing that the query is constructed using raw string concatenation. Armed with this knowledge of the exact query logic, the attacker executes a SQL Injection attack (Finding 1) on the `/rest/user/login` endpoint using `' OR 1=1--` to bypass authentication and log in directly as the administrator, completing the full system takeover.
-5. **Phase 5 (Business Impact & Records Exposed):** The successful execution of this chained attack results in the unauthorized disclosure of PII for all 24 registered users, exposure of proprietary business logic, leak of historical coupon code structures, and administrative-level control over the application's database.
+1. **Phase 1 (Reconnaissance & Codebase Disclosure):** An unauthenticated attacker discovers the `/ftp` directory (Finding 2) through directory brute-forcing or analyzing the site's `robots.txt` file. Finding directory listing active, they download `package.json.bak` using a double-URL-encoded null byte (`%2500.md`) to bypass the download extension whitelist.
+2. **Phase 2 (Stack Discovery & Authentication Bypass):** Analyzing the leaked `package.json.bak` reveals the backend library stack (specifically Sequelize and SQLite3). Informed of this structure, the attacker probes the `/rest/user/login` endpoint and exploits a SQL Injection vulnerability (Finding 1) with the payload `' OR 1=1--` to bypass authentication and log in directly as the administrator.
+3. **Phase 3 (Privilege Escalation & Data Harvesting):** In parallel, because self-registration is publicly open, the attacker registers a standard customer account to obtain a valid JWT. They exploit Insecure Direct Object Reference (IDOR) (Finding 3) on the `/rest/basket/{id}` endpoint. By altering the basket ID path parameter, they systematically scrape purchase data for all registered users.
+4. **Phase 4 (Impact & Records Exposed):** The combination of these exploits exposes sensitive purchase history and personally identifiable information (PII) for all 24 registered database users. The attacker also acquires admin-level token privileges and exposes internal configuration files, representing a severe data breach.
 
 ---
 
@@ -73,7 +98,79 @@ The database handler concatenates user-supplied email input directly into the SQ
 
 ---
 
-## Finding 2 — A01:2021 — Broken Access Control (Basket IDOR)
+## Finding 2 — A05:2021 — Security Misconfiguration (Forced Browsing / Sensitive files via /ftp)
+**Severity:** High  
+**CVSS v3.1:** 7.5 (`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`)  
+**Endpoint:** `GET /ftp`
+
+### Description
+The server exposes directory listing and download capability for the `/ftp` route without authentication, exposing internal backup markdown documents and configuration files. Additionally, restricted file extension checks can be bypassed using URL-encoded null bytes.
+
+### Verification of Bypass on v19.3.1
+The null byte bypass remains fully functional on OWASP Juice Shop v19.3.1. When requesting `http://localhost:3000/ftp/package.json.bak%2500.md`, the web server receives the request, processes the `.md` extension check, but the low-level file system read API truncates the path at the null character, outputting the contents of `package.json.bak`.
+
+### Reproduction
+1. Direct the browser to `http://localhost:3000/ftp` or run:
+   ```bash
+   curl -k GET http://localhost:3000/ftp
+   ```
+2. Request a restricted backup file (e.g., `package.json.bak`) by bypassing extension validation with a double-encoded null byte:
+   ```bash
+   curl http://localhost:3000/ftp/package.json.bak%2500.md
+   ```
+
+### Evidence
+![Exposed FTP Directory](./screenshots/Screenshot_2026-06-17_10_30_19.png)
+*Figure 2: Active directory listing displaying files in the /ftp directory.*
+
+**Raw Response Body Content of `coupons_2013.md.bak`:**
+```text
+n<MibgC7sn
+mNYS#gC7sn
+o*IVigC7sn
+k#pDlgC7sn
+o*I]pgC7sn
+n(XRvgC7sn
+n(XLtgC7sn
+k#*AfgC7sn
+q:<IqgC7sn
+pEw8ogC7sn
+pes[BgC7sn
+l}6D$gC7ss
+```
+
+**Partial Dependency Disclosure from `package.json.bak`:**
+```json
+{
+  "name": "juice-shop",
+  "version": "6.2.0-SNAPSHOT",
+  "description": "An intentionally insecure JavaScript Web Application",
+  "dependencies": {
+    "express": "~4.16",
+    "sequelize": "~4",
+    "sqlite3": "~3.1.13"
+  }
+}
+```
+
+![Exposed Sensitive File Content](./screenshots/Screenshot_2026-06-17_10_30_51.png)
+*Figure 3: Successful bypass and download of coupons_2013.md.bak exposing reversible coupon structures.*
+
+### Root Cause
+The application server configuration enables directory browsing on the `/ftp` path. Furthermore, the file download validation logic is vulnerable to null-byte injection (`%00` or double-encoded `%2500`), which causes the file system API to truncate the path string and serve the `.bak` file while bypassing the application's extension whitelist check.
+
+### Remediation
+- Disable directory browsing on the web server config or the static directory serving route.
+- Restrict sensitive files and backups from being kept in the web-root directories.
+- Clean and sanitize input file path parameters by rejecting null bytes (`%00`, `\0`) and path traversal sequences (`../`).
+
+### References
+- OWASP A05:2021 — Security Misconfiguration
+- CWE-200: Exposure of Sensitive Information to an Unauthorized Actor
+
+---
+
+## Finding 3 — A01:2021 — Broken Access Control (Basket IDOR)
 **Severity:** Medium  
 **CVSS v3.1:** 6.5 (`CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N`)  
 **Endpoint:** `GET /rest/basket/{id}`
@@ -97,16 +194,16 @@ The application does not validate that the user requesting the shopping basket o
 
 ### Evidence
 ![Own Basket View](./screenshots/Screenshot_2026-06-17_10_23_03.png)
-*Figure 2: Authenticated user viewing their own shopping basket.*
+*Figure 4: Authenticated user viewing their own shopping basket.*
 
 ![Unauthorized Basket View](./screenshots/Screenshot_2026-06-17_10_24_59.png)
-*Figure 3: Accessing another user's basket by modifying the basket ID.*
+*Figure 5: Accessing another user's basket by modifying the basket ID.*
 
 ### Root Cause
 Modern Sequelize implementation of basket fetching retrieves basket resources based directly on the path parameter without validating if the JWT's embedded `bid` matches the path's `{id}`.
 
 ### Remediation
-- Enforce strict server-side authorization checks on the `/rest/basket/{id}` endpoint to ensure the user ID in the JWT matches the `UserId` associated with the requested basket.
+- Enforce server-side authorization checks on the `/rest/basket/{id}` endpoint to ensure the user ID in the JWT matches the `UserId` associated with the requested basket.
 - Avoid using predictable, sequential integer keys for basket paths; utilize UUIDs or session-bound paths where appropriate.
 
 ### References
@@ -115,71 +212,13 @@ Modern Sequelize implementation of basket fetching retrieves basket resources ba
 
 ---
 
-## Finding 3 — A05:2021 — Security Misconfiguration (Forced Browsing / Sensitive files via /ftp)
-**Severity:** High  
-**CVSS v3.1:** 7.5 (`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`)  
-**Endpoint:** `GET /ftp`
-
-### Description
-The server exposes directory listing and download capability for the `/ftp` route, exposing internal backup markdown documents and configuration files. Additionally, restricted file extension checks can be bypassed using URL-encoded null bytes.
-
-### Verification of Bypass on v19.3.1
-The null byte bypass remains fully functional on OWASP Juice Shop v19.3.1. When requesting `http://localhost:3000/ftp/coupons_2013.md.bak%2500.md`, the web server receives the request, processes the `.md` extension check, but the low-level file system read API truncates the path at the null character, outputting the contents of `coupons_2013.md.bak`.
-
-### Reproduction
-1. Direct the browser to `http://localhost:3000/ftp` or run:
-   ```bash
-   curl -k GET http://localhost:3000/ftp
-   ```
-2. Request a restricted backup file (e.g. `coupons_2013.md.bak`) by bypassing extension validation with a double-encoded null byte:
-   ```bash
-   curl http://localhost:3000/ftp/coupons_2013.md.bak%2500.md
-   ```
-
-### Evidence
-![Exposed FTP Directory](./screenshots/Screenshot_2026-06-17_10_30_19.png)
-*Figure 4: Active directory listing displaying files in the /ftp directory.*
-
-**Raw Response Body Content (Retrieved from v19.3.1 Instance):**
-```text
-n<MibgC7sn
-mNYS#gC7sn
-o*IVigC7sn
-k#pDlgC7sn
-o*I]pgC7sn
-n(XRvgC7sn
-n(XLtgC7sn
-k#*AfgC7sn
-q:<IqgC7sn
-pEw8ogC7sn
-pes[BgC7sn
-l}6D$gC7ss
-```
-
-![Exposed Sensitive File Content](./screenshots/Screenshot_2026-06-17_10_30_51.png)
-*Figure 5: Successful bypass and download of coupons_2013.md.bak exposing reversible coupon structures.*
-
-### Root Cause
-The application server configuration enables directory browsing on the `/ftp` path. Furthermore, the file download validation logic is vulnerable to null-byte injection (`%00` or double-encoded `%2500`), which causes the file system API to truncate the path string and serve the `.bak` file while bypassing the application's extension whitelist check.
-
-### Remediation
-- Disable directory browsing on the web server config or the static directory serving route.
-- Restrict sensitive files and backups from being kept in the web-root directories.
-- Clean and sanitize input file path parameters by rejecting null bytes (`%00`, `\0`) and path traversal sequences (`../`).
-
-### References
-- OWASP A05:2021 — Security Misconfiguration
-- CWE-200: Exposure of Sensitive Information to an Unauthorized Actor
-
----
-
 ## Recommendations (Prioritized)
 1. **Immediate:** Upgrade login logic to use parameterized queries (Finding 1) to break the initial entry point of the attack chain.
-2. **High:** Enforce authorization checks on `GET /rest/basket/{id}` (Finding 2) to protect customer PII from exposure.
-3. **Medium:** Disable directory listing and restrict access to the `/ftp` directory (Finding 3), ensuring sensitive file extensions cannot be bypassed.
+2. **High:** Enforce authorization checks on `GET /rest/basket/{id}` (Finding 3) to protect customer PII from exposure.
+3. **Medium:** Disable directory listing and restrict access to the `/ftp` directory (Finding 2), ensuring sensitive file extensions cannot be bypassed.
 
 ## Regulatory Context
-Under Kenya's Data Protection Act 2019, the unauthorized exposure of customer PII (Finding 2) constitutes a personal data breach. Pursuant to Section 43, the data controller is required to notify the Office of the Data Protection Commissioner (ODPC) within 72 hours of identification. Under Section 72, non-compliance or failure to protect user data carries statutory penalties of up to KES 5,000,000 or 1% of the annual turnover, whichever is lower.
+Under Kenya's Data Protection Act 2019, the unauthorized exposure of customer PII (Finding 3) constitutes a personal data breach. Pursuant to Section 43, the data controller is required to notify the Office of the Data Protection Commissioner (ODPC) within 72 hours of identification. Under Section 72, non-compliance or failure to protect user data carries statutory penalties of up to KES 5,000,000 or 1% of the annual turnover, whichever is lower.
 
 ## Appendix A — Tooling
 - Burp Suite Community Edition (v147.0.7727.101)
