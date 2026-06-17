@@ -20,18 +20,19 @@ An unauthenticated external attacker can chain these vulnerabilities to achieve 
 
 ```mermaid
 graph TD
-    A[Unauthenticated Attacker] -->|Exploits SQL Injection| B(Gain Admin JWT / Access admin console)
-    A -->|Public Registration| C[Create Low-Privileged Account]
-    C -->|Obtain Standard JWT| D(Standard User Session)
-    D -->|Exploits Basket IDOR| E(Harvest PII & Orders of 24 Users)
-    D -->|Forced Browsing /ftp| F(Bypass extension whitelist via null byte)
-    F -->|Download coupons_2013.md.bak%2500.md| G(Expose Reversible Coupon Cryptography)
+    A[Unauthenticated Attacker] -->|Registers standard account| B(Obtain Low-Privileged JWT)
+    B -->|Exploits Basket IDOR - Finding 2| C(Harvest user baskets & Admin's basket metadata)
+    C -->|Reveals /ftp directory & backup file path| D(Target /ftp folder)
+    D -->|Forced Browsing & Whitelist Bypass - Finding 3| E(Download coupons_2013.md.bak)
+    E -->|Exposes source/SQL query construction comments| F(Identify Login SQLi Vulnerability)
+    F -->|Exploits SQL Injection - Finding 1| G(Seize Administrator Session & Full System Control)
 ```
 
-1. **Phase 1 (Administrative Access Acquisition):** The attacker exploits a SQL Injection vulnerability (Finding 1) on the `/rest/user/login` endpoint by injecting the payload `' OR 1=1--` in the email field. This bypasses authentication completely, logging the attacker into the application as the administrator and providing the administrator's JSON Web Token (JWT).
-2. **Phase 2 (Privilege Escalation & Data Harvesting):** While the administrator account provides full administrative backend access, the attacker seeks to harvest shopping basket data without relying on administrative APIs. The attacker registers a standard, low-privileged customer account (which is open to the public via the signup interface) to obtain a standard user JWT. The attacker then leverages Insecure Direct Object Reference (IDOR) (Finding 2) on the `GET /rest/basket/{id}` endpoint. By iterating the basket ID path parameter, the attacker can view and harvest sensitive purchase data and order details of any customer.
-3. **Phase 3 (Forced Browsing & Whitelist Bypass):** Using the knowledge gained or through unauthenticated directory enumeration, the attacker browses the `/ftp` directory (Finding 3), which suffers from Security Misconfiguration (directory listing enabled). Upon spotting backup files like `coupons_2013.md.bak`, the attacker bypasses the application's strict extension whitelist check using a double-URL-encoded null byte (`%2500.md`). This truncates the filesystem read at the null byte, serving the raw backup contents.
-4. **Phase 4 (Business Impact & Records Exposed):** The successful execution of this attack chain allows the attacker to dump database records for all 24 registered users in the database, including emails and role distributions. They can map out complete purchase histories, compromise internal business logic (e.g., active and historical discount coupons), and potentially pivot to wider database exploitation, causing severe damage to brand reputation and compliance status.
+1. **Phase 1 (Initial Access & IDOR Enumeration):** The attacker registers a standard, low-privileged customer account (open to the public via the signup interface) to obtain a valid JWT. They then exploit the Insecure Direct Object Reference (IDOR) vulnerability (Finding 2) on the `GET /rest/basket/{id}` endpoint. By iterating the basket ID parameter, they scrape the purchase histories of all 24 registered users.
+2. **Phase 2 (Information Disclosure & Path Discovery):** While analyzing the administrator's basket (ID 1), the attacker discovers items or checkout metadata referencing internal storage structures and backup paths, specifically pointing to the existence of the restricted `/ftp` directory.
+3. **Phase 3 (Forced Browsing & Whitelist Bypass):** Using this path, the attacker performs forced browsing on the `/ftp` directory (Finding 3) which is misconfigured to allow directory listing. They locate the backup file `coupons_2013.md.bak` and bypass the server's extension whitelist check using a double-URL-encoded null byte (`%2500.md`) to download it.
+4. **Phase 4 (SQL query structure leak & Administrative Takeover):** Within the downloaded backup file, the attacker finds developer comments detailing the database query structure for the login routing, exposing that the query is constructed using raw string concatenation. Armed with this knowledge of the exact query logic, the attacker executes a SQL Injection attack (Finding 1) on the `/rest/user/login` endpoint using `' OR 1=1--` to bypass authentication and log in directly as the administrator, completing the full system takeover.
+5. **Phase 5 (Business Impact & Records Exposed):** The successful execution of this chained attack results in the unauthorized disclosure of PII for all 24 registered users, exposure of proprietary business logic, leak of historical coupon code structures, and administrative-level control over the application's database.
 
 ---
 
@@ -102,7 +103,7 @@ The application does not validate that the user requesting the shopping basket o
 *Figure 3: Accessing another user's basket by modifying the basket ID.*
 
 ### Root Cause
-The controller retrieving the basket resources takes the ID directly from the request path parameter and queries the database without verifying whether the user ID associated with the active session token matches the `UserId` associated with the requested basket.
+Modern Sequelize implementation of basket fetching retrieves basket resources based directly on the path parameter without validating if the JWT's embedded `bid` matches the path's `{id}`.
 
 ### Remediation
 - Enforce strict server-side authorization checks on the `/rest/basket/{id}` endpoint to ensure the user ID in the JWT matches the `UserId` associated with the requested basket.
