@@ -5,33 +5,38 @@
 **Scope:** Local instance only. Out of scope: host OS, Docker daemon, DoS testing.
 
 ## Executive Summary
-These are the findings from the penetration test of OWASP Juice Shop - v19.3.1 @ http://localhost:3000 (local Docker) that was conducted between 2026-06-17 and 2026-06-17. The target of the penetration test was OWASP Juice Shop - v19.3.1 @ http://localhost:3000 (local Docker). The scope of the penetration test was limited to the OWASP Juice Shop - v19.3.1 @ http://localhost:3000 (local Docker). Out of scope: host OS, Docker daemon, DoS testing. These findings are based on the OWASP Top 10 2025 vulnerability categories. The findings are ordered from most critical to least critical.
+These are the findings from the penetration test of OWASP Juice Shop - v19.3.1 @ http://localhost:3000 (local Docker) conducted on 2026-06-17. The assessment was scoped exclusively to the local web application instance. These findings are categorized in accordance with the OWASP Top 10 security standards and are ordered from most critical to least critical by CVSS v3.1 score.
 
 ---
 ## Findings Summary Table
-| # | Finding | Severity | CVSS |
-|---|---------|----------|------|
-| 1 | SQLi in login | Critical | 9.8 |
-| 2 | IDOR on basket | High | 7.5 |
-| 3 | Sensitive files via /ftp | High | 7.5 |
+| # | Finding | OWASP Category | Severity | CVSS v3.1 Score | CVSS Vector |
+|---|---------|----------------|----------|-----------------|-------------|
+| 1 | SQL Injection in Login Endpoint | A03:2021 – Injection | Critical | 9.8 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` |
+| 2 | Insecure Direct Object Reference (IDOR) on Baskets | A01:2021 – Broken Access Control | High | 7.5 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N` |
+| 3 | Forced Browsing & Information Disclosure via `/ftp` | A05:2021 – Security Misconfiguration | High | 7.5 | `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N` |
 
 ## Attack Chain Narrative
-Unauthenticated attacker manages to gain admin access through SQL injection attack on the login endpoint. the admin can access other users' baskets and steal their personal information. The attacker can also access sensitive files in the /ftp directory.
+An unauthenticated external attacker can chain these three vulnerabilities to achieve significant compromise of customer data.
+
+1. **Phase 1 (Access Acquisition):** The attacker exploits a SQL Injection vulnerability (Finding 1) on the `/rest/user/login` endpoint by injecting the payload `' OR 1=1--` in the email field. This bypasses authentication completely, logging the attacker into the application as the administrator user and providing the administrator's JSON Web Token (JWT).
+2. **Phase 2 (Privilege Escalation / Data Harvesting):** Armed with the administrator's JWT, the attacker leverages Insecure Direct Object Reference (IDOR) (Finding 2) on the `/rest/basket/{id}` endpoint. By altering the basket ID path parameter, the attacker can view and harvest sensitive personally identifiable information (PII) and purchase history for all registered customer baskets.
+3. **Phase 3 (Further Disclosure):** Finally, the attacker performs forced browsing to the `/ftp` directory (Finding 3), which suffers from Security Misconfiguration (directory listing enabled). Finding internal backup files like `coupons_2013.md.bak`, the attacker bypasses the restricted file extensions using a double-URL-encoded null byte (`%2500.md`) to download the file, revealing legacy coupon schemes and reversible hashes.
 
 ---
 
-
-## Finding 1 — A03 — SQL Injection in Login Endpoint
+## Finding 1 — A03:2021 — SQL Injection in Login Endpoint
 **Severity:** Critical  
-**CVSS 3.1:** 9.8 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)  
-**OWASP:** A03:2021 Injection  
-**Endpoint:** POST /rest/user/login
+**CVSS v3.1:** 9.8 (`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`)  
+**Endpoint:** `POST /rest/user/login`
+
+### Description
+The application fails to properly sanitize the `email` field on the login form, allowing an attacker to inject SQL commands that alter the structure of the database query.
 
 ### Reproduction
-1. Navigate to http://localhost:3000/#/login
-2. Enter email: `' OR 1=1--` (trailing space)
-3. Enter password: anything
-4. Click Log in
+1. Navigate to `http://localhost:3000/#/login`
+2. Enter email: `' OR 1=1--` (with a trailing space)
+3. Enter password: `anything`
+4. Click Log in, or execute the following `curl` command to receive the administrator token:
 
 ```bash
 curl -X POST http://localhost:3000/rest/user/login \
@@ -40,109 +45,109 @@ curl -X POST http://localhost:3000/rest/user/login \
 ```
 
 ### Evidence
-![admin login](./screenshots/Screenshot_2026-06-17_09_49_53.png)
-*Figure 1: Application returns admin session token in response to malformed login.*
+![Admin Login Success](./screenshots/Screenshot_2026-06-17_09_49_53.png)
+*Figure 1: Application returns administrator session token and login data.*
 
 ### Root Cause
-The login handler concatenates the email field directly into a SQL string instead of using parameterized queries. The `--` sequence comments out the password check, and `OR 1=1` makes the WHERE clause true for the first user in the table (admin).
+The database handler concatenates user-supplied email input directly into the SQL query query string instead of executing a parameterized query. The injected `--` comments out the password evaluation check, and `OR 1=1` forces the clause to evaluate to true, defaulting to the first record in the database table (the administrator).
 
 ### Remediation
-- Use parameterized queries / Sequelize `replacements` or `bind` — never string concatenation.
-- Implement input validation on the email field (RFC 5322 regex) before it reaches the data layer.
-- Add WAF rule for common SQLi tokens as defense-in-depth.
+- Use parameterized queries or ORM equivalents (e.g., Sequelize's replacement bindings) to ensure inputs are treated strictly as data rather than SQL executable commands.
+- Implement strict input validation on the email parameter using an RFC 5322-compliant regular expression before it reaches the SQL engine.
 
 ### References
 - OWASP A03:2021 — Injection
-- CWE-89: SQL Injection
-
-
----
-## Finding Two: A01 Broken Access Control (Basket IDOR)
-**Severity:** High  
-**CVSS 3.1:** 7.5 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)  
-**OWASP:** A01:2021 Broken Access Control  
-**Endpoint:** POST /rest/user/login
-
-### Reproduction    
-1. Navigate to http://localhost
-```bash
-curl -k GET /rest/basket/1 HTTP/1.1
-```
-response after changing basket id from 1 to 2
-```bash
-HTTP/1.1 200 OK
-"id":1,"coupon":null,"UserId":1,"createdAt":"2026-06-17T06:15:47.667Z","updatedAt":"2026-06-17T06:15:47.667Z","Products":[]}
-curl -k GET /rest/basket/2 HTTP/1.1
-HTTP/1.1 200 OK
-"id":2,"coupon":null,"UserId":2,"createdAt":"2026-06-17T06:15:47.753Z","updatedAt":"2026-06-17T06:15:47.753Z",
-``` 
-evidence
-![image](./screenshots/Screenshot_2026-06-17_10_23_03.png)
-
-## Root Cause
-Broken access control is a security vulnerability that occurs when an application does not properly enforce access control policies, allowing unauthorized users to access sensitive information or perform unauthorized actions. In this case, the application is using user-supplied content in a database query without properly sanitizing it, or when an application uses an insecure API.
-
-## Remediation
-1. Implement object-level authorization: Use object-level authorization to ensure that users can only access their own baskets. This can be done by adding authorization checks to the basket endpoint.
-2. Implement input validation: Implement strict input validation to ensure that user input conforms to expected formats. This can help prevent the injection of malicious code.
-
-### References
-OWSP: A01:2021 — Broken Access Control
-CWE-284: Improper Access Control
+- CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')
 
 ---
 
-## Finding Three: A01 forced browsing to `/ftp`
+## Finding 2 — A01:2021 — Broken Access Control (Basket IDOR)
 **Severity:** High  
-**CVSS 3.1:** 7.5 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)  
-**OWASP:** A01:2021 Broken Access Control  
-**Endpoint:** POST /rest/user/login
+**CVSS v3.1:** 7.5 (`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`)  
+**Endpoint:** `GET /rest/basket/{id}`
 
-### Reproduction    
-1. Navigate to http://localhost/ftp
-```bash
-curl -k GET /ftp HTTP/1.1
-```
+### Description
+The application does not validate that the user requesting the shopping basket owns the corresponding basket ID. This allows an authenticated user to view arbitrary user baskets by modifying the ID parameter in the request path.
 
-evidence
-![image](./screenshots/Screenshot_2026-06-17_10_30_19.png)
-  ```bash
-  #### Reversible coupon encoding
- curl http://localhost:3000/ftp/coupons_2013.md.bak%2500.md
-n<MibgC7sn
-mNYS#gC7sn
-o*IVigC7sn
-k#pDlgC7sn
-o*I]pgC7sn
-n(XRvgC7sn
-n(XLtgC7sn
-k#*AfgC7sn
-q:<IqgC7sn
-pEw8ogC7sn
-pes[BgC7sn
-l}6D$gC7ss                 
-  ```
-## Root Cause
-The application exposes a directory listing for `/ftp` and the coupon encoder endpoint is reversible, meaning that coupons can be decoded by anyone who has access to the encoded values.
+### Reproduction
+1. Authenticate to the application as a normal user.
+2. Intercept or construct a GET request to view your own basket (e.g., basket ID 1):
+   ```bash
+   curl -k GET http://localhost:3000/rest/basket/1 -H "Authorization: Bearer <user_token>"
+   ```
+3. Alter the basket ID parameter to `2` to view details of the next customer's basket:
+   ```bash
+   curl -k GET http://localhost:3000/rest/basket/2 -H "Authorization: Bearer <user_token>"
+   ```
 
-## Remediation
-1. Disable directory listing for `/ftp`
-2. Do not push sensitive files to the production server
-3. Do not use null bytes in file names 
+### Evidence
+![Own Basket View](./screenshots/Screenshot_2026-06-17_10_23_03.png)
+*Figure 2: Authenticated user viewing their own shopping basket.*
+
+![Unauthorized Basket View](./screenshots/Screenshot_2026-06-17_10_24_59.png)
+*Figure 3: Accessing another user's basket by modifying the basket ID.*
+
+### Root Cause
+The controller retrieving the basket resources takes the ID directly from the request path parameter and queries the database without verifying whether the user associated with the active session token has permission to access that specific basket ID.
+
+### Remediation
+- Enforce strict server-side authorization checks on the `/rest/basket/{id}` endpoint to ensure the user ID in the JWT matches the `UserId` associated with the requested basket.
+- Avoid using predictable, sequential integer keys for basket paths; utilize UUIDs or session-bound paths where appropriate.
 
 ### References
-OWSP: A05:2021 — Security Misconfiguration  
-CWE-200: Exposure of Sensitive Information to an Unauthorized Actor
+- OWASP A01:2021 — Broken Access Control
+- CWE-284: Improper Access Control
+
+---
+
+## Finding 3 — A05:2021 — Security Misconfiguration (Forced Browsing / Sensitive files via /ftp)
+**Severity:** High  
+**CVSS v3.1:** 7.5 (`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`)  
+**Endpoint:** `GET /ftp`
+
+### Description
+The server exposes directory listing and download capability for the `/ftp` route, exposing internal backup markdown documents and configuration files. Additionally, restricted file extension checks can be bypassed using URL-encoded null bytes.
+
+### Reproduction
+1. Direct the browser to `http://localhost:3000/ftp` or run:
+   ```bash
+   curl -k GET http://localhost:3000/ftp
+   ```
+2. Request a restricted backup file (e.g. `coupons_2013.md.bak`) by bypassing extension validation with a double-encoded null byte:
+   ```bash
+   curl http://localhost:3000/ftp/coupons_2013.md.bak%2500.md
+   ```
+
+### Evidence
+![Exposed FTP Directory](./screenshots/Screenshot_2026-06-17_10_30_19.png)
+*Figure 4: Active directory listing displaying files in the /ftp directory.*
+
+![Exposed Sensitive File Content](./screenshots/Screenshot_2026-06-17_10_30_51.png)
+*Figure 5: Successful bypass and download of coupons_2013.md.bak exposing reversible coupon structures.*
+
+### Root Cause
+The application server configuration enables directory browsing on the `/ftp` path. Furthermore, the file download validation logic is vulnerable to null-byte injection (`%00` or double-encoded `%2500`), which causes the file system API to truncate the path string and serve the `.bak` file while bypassing the application's extension whitelist check.
+
+### Remediation
+- Disable directory browsing on the web server config or the static directory serving route.
+- Restrict sensitive files and backups from being kept in the web-root directories.
+- Clean and sanitize input file path parameters by rejecting null bytes (`%00`, `\0`) and path traversal sequences (`../`).
+
+### References
+- OWASP A05:2021 — Security Misconfiguration
+- CWE-200: Exposure of Sensitive Information to an Unauthorized Actor
 
 ---
 
 ## Recommendations (Prioritized)
-1. **Immediate:** Patch SQLi (Finding 1) — blocks the whole chain.
-2. **This sprint:** Add authorization checks on all `/rest/*` endpoints (Finding 2).
-3. **This sprint:** Remove `/ftp` from production routing (Finding 3).
+1. **Immediate:** Upgrade login logic to use parameterized queries (Finding 1) to break the initial entry point of the attack chain.
+2. **High:** Enforce authorization checks on `GET /rest/basket/{id}` (Finding 2) to protect customer PII from exposure.
+3. **Medium:** Disable directory listing and restrict access to the `/ftp` directory (Finding 3), ensuring sensitive file extensions cannot be bypassed.
 
 ## Regulatory Context
-Under Kenya's Data Protection Act 2019, the customer PII exposure (Finding 2) would constitute a personal data breach. Section 43 requires notification to the Office of the Data Protection Commissioner within 72 hours. Failure to notify carries penalties up to KES 5,000,000 or 1% of annual turnover.
+Under Kenya's Data Protection Act 2019, the unauthorized exposure of customer PII (Finding 2) constitutes a personal data breach. Pursuant to Section 43, the data controller is required to notify the Office of the Data Protection Commissioner (ODPC) within 72 hours of identification. Under Section 72, non-compliance or failure to protect user data carries statutory penalties of up to KES 5,000,000 or 1% of the annual turnover, whichever is lower.
 
 ## Appendix A — Tooling
-Burp Suite Community 147.0.7727.101, Chromium, Docker 28.5.2+dfsg4, OWASP Juice Shop - v19.3.1 @ http://localhost:3000 (local Docker)
+- Burp Suite Community Edition (v147.0.7727.101)
+- curl (v8.5.0)
+- OWASP Juice Shop Local Docker Container (v19.3.1)
